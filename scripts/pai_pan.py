@@ -1134,11 +1134,19 @@ def compute_shensha(
     nayin_wx = NAYIN.get(year_gz)
     if nayin_wx:
         tongzi_need |= set(TONGZI_NAYIN[nayin_wx])
-    # 只看日支与时支（童子煞以日时必须见）
-    day_hour_zhis = (day_zhi, hour_zhi)
-    day_hour_labels = ("日柱", "时柱")
-    tongzi_hits = [lab for z, lab in zip(day_hour_zhis, day_hour_labels) if z is not None and z in tongzi_need]
-    add("童子煞", tongzi_hits, "季节/年纳音查日时支")
+    # 可查地支：时柱未知时**不含时支**。
+    # 铁律：时柱未知不得用时支凑神煞，否则会把未提供的信息当成已命中。
+    # 变量名避开上面四柱的 zhis，防止阴影覆盖。
+    tongzi_pairs = [
+        (z, lab) for z, lab in ((day_zhi, "日柱"), (hour_zhi, "时柱")) if z is not None
+    ]
+    tongzi_hits = [lab for z, lab in tongzi_pairs if z in tongzi_need]
+    # 说明文字随可查范围变化，避免"查日时支"与实际口径矛盾
+    if hour_zhi is None:
+        tongzi_method = "季节/年纳音查日支（时柱未知，未参与判定）"
+    else:
+        tongzi_method = "季节/年纳音查日时支"
+    add("童子煞", tongzi_hits, tongzi_method)
 
     # 天罗地网：男忌辰、女忌戌
     luowang = TIANLUO if sex == "男" else DIWANG
@@ -1641,6 +1649,13 @@ def format_report(result):
 # ---------------------------------------------------------------------------
 
 def parse_iso_date(text, flag):
+    """解析 YYYY-MM-DD。
+
+    注意：argparse.ArgumentTypeError 必须从**外层**抛出。
+    若写在 except ValueError 内部抛出，它会被 argparse 的
+    except (TypeError, ValueError) 一起吃掉，最终以未捕获堆栈崩溃
+    （ArgumentTypeError 是 ValueError 的子类）。
+    """
     try:
         parts = text.split("-")
         if len(parts) != 3:
@@ -1648,10 +1663,12 @@ def parse_iso_date(text, flag):
         y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
         return date(y, m, d)
     except ValueError:
-        raise argparse.ArgumentTypeError("%s 需要 YYYY-MM-DD，收到 %r" % (flag, text))
+        pass
+    raise argparse.ArgumentTypeError("%s 需要 YYYY-MM-DD，收到 %r" % (flag, text))
 
 
 def parse_hour(text):
+    """解析 HH:MM。同 parse_iso_date：ArgumentTypeError 必须在外层抛出。"""
     try:
         hh, mm = text.split(":")
         h, m = int(hh), int(mm)
@@ -1659,15 +1676,28 @@ def parse_hour(text):
             raise ValueError
         return h, m
     except ValueError:
-        raise argparse.ArgumentTypeError("--hour 需要 HH:MM，收到 %r" % text)
+        pass
+    raise argparse.ArgumentTypeError("--hour 需要 HH:MM，收到 %r" % text)
+
+
+def _iso_date_arg(flag):
+    """把 parse_iso_date 绑定到具体参数名，供 argparse 的 type= 使用。
+
+    必须走 type= 回调，argparse 才会捕获 ArgumentTypeError 并转成干净的
+    用法错误（退出码 2）；在 run() 里手工调用会让异常逃逸成未捕获堆栈。
+    """
+    def _parse(text):
+        return parse_iso_date(text, flag)
+    _parse.__name__ = "iso_date"
+    return _parse
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="四柱八字排盘（北京时间，无第三方依赖）")
-    p.add_argument("--solar", help="阳历 YYYY-MM-DD")
-    p.add_argument("--lunar", help="农历 YYYY-MM-DD（年-月-日数字）")
+    p = argparse.ArgumentParser(description="四柱八字排盘（北京时间，农历依赖内嵌 vendor/lunar_python）")
+    p.add_argument("--solar", type=_iso_date_arg("--solar"), help="阳历 YYYY-MM-DD")
+    p.add_argument("--lunar", type=_iso_date_arg("--lunar"), help="农历 YYYY-MM-DD（年-月-日数字）")
     p.add_argument("--leap", action="store_true", help="农历闰月")
-    p.add_argument("--hour", help="出生钟点 HH:MM（北京时间），与 --shichen 互斥")
+    p.add_argument("--hour", type=parse_hour, help="出生钟点 HH:MM（北京时间），与 --shichen 互斥")
     p.add_argument("--shichen", choices=ZHI_LIST, help="时辰地支")
     p.add_argument("--sex", required=True, choices=("男", "女"), help="性别（必填）")
     p.add_argument("--place", help="出生地（只展示；近时辰边界时警告）")
@@ -1686,16 +1716,18 @@ def run(argv=None):
     if args.leap and not args.lunar:
         parser.error("--leap 只能与 --lunar 同时使用")
 
+    # --hour 的 type=parse_hour 已把值转成 (时, 分)
     hour = minute = None
-    if args.hour:
-        hour, minute = parse_hour(args.hour)
+    if args.hour is not None:
+        hour, minute = args.hour
 
+    # --solar / --lunar 的 type= 已把值转成 datetime.date
     solar_date = None
     lunar_display = None
     if args.solar:
-        solar_date = parse_iso_date(args.solar, "--solar")
+        solar_date = args.solar
     if args.lunar:
-        lunar_date = parse_iso_date(args.lunar, "--lunar")
+        lunar_date = args.lunar
         try:
             converted = lunar_to_solar(lunar_date.year, lunar_date.month, lunar_date.day, leap=args.leap)
         except ValueError as exc:
