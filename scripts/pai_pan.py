@@ -54,9 +54,19 @@
 
 import argparse
 import math
+import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
+
+# 节气时刻优先采用内嵌的 lunar-python（寿星天文历定气）。
+# MIT License，见 vendor/lunar-python-LICENSE。
+# 农历换算暂仍用本文件自研实现，后续单独切换。
+_VENDOR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor")
+if _VENDOR not in sys.path:
+    sys.path.insert(0, _VENDOR)
+
+from lunar_python import Solar  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -470,11 +480,48 @@ def jdn(year, month, day):
 
 
 # ---------------------------------------------------------------------------
-# 太阳视黄经 / 二十四节气
+# 二十四节气
 # ---------------------------------------------------------------------------
+#
+# 优先使用 vendor/lunar_python 的寿星天文历定气（精度到秒级）。
+# 下方自研的 Meeus 简式仅作兜底：它约有 3–7 分钟误差，
+# 出生时刻若落在节气前后几分钟内，会把年柱/月柱判到错的月建上
+# （实测 2024 年立春：自研 16:20:11 vs 真实 16:27:07）。
+
+# 黄经 → (参考库表里的本年名, 跨年别名)
+# 参考库的节气表覆盖「前一年大雪 → 次年立春」共 31 项。
+# 同一个名字在这张表里可能出现两次，跨年的那次用大写别名区分：
+#   冬至 → DONG_ZHI（本年 12 月）、小寒 → XIAO_HAN、立春 → LI_CHUN 等。
+_LON_TO_NAME = {
+    315: ("立春", "LI_CHUN"),
+    345: ("惊蛰", "JING_ZHE"),
+    15: ("清明", None),
+    45: ("立夏", None),
+    75: ("芒种", None),
+    105: ("小暑", None),
+    135: ("立秋", None),
+    165: ("白露", None),
+    195: ("寒露", None),
+    225: ("立冬", None),
+    255: ("大雪", None),
+    285: ("小寒", "XIAO_HAN"),
+    270: ("冬至", "DONG_ZHI"),
+    300: ("大寒", "DA_HAN"),
+    330: ("雨水", "YU_SHUI"),
+    0: ("春分", None),
+    30: ("谷雨", None),
+    60: ("小满", None),
+    90: ("夏至", None),
+    120: ("大暑", None),
+    150: ("处暑", None),
+    180: ("秋分", None),
+    210: ("霜降", None),
+    240: ("小雪", None),
+}
+
 
 def sun_apparent_longitude(jd_tt):
-    """太阳视黄经（度）。Meeus AA 第 25 章简式，1900–2100 约 0.01°（十余分钟）以内。"""
+    """太阳视黄经（度）。Meeus AA 第 25 章简式，仅作兜底。"""
     T = (jd_tt - J2000) / 36525.0
     L0 = 280.46646 + 36000.76983 * T + 0.0003032 * T * T
     M = 357.52911 + 35999.05029 * T - 0.0001537 * T * T
@@ -495,12 +542,8 @@ def _lon_delta(actual, target):
 
 
 @lru_cache(maxsize=4096)
-def solar_term_jd(year, longitude):
-    """给定公历年、目标黄经，返回该年对应定气的 TT 儒略日。
-
-    当年 1 月 1 日太阳黄经约 280°，沿黄道正向走到 target（可跨 360°）。
-    立春 = 315°。禁止用「大约 2 月 3–5 日」这种写死日期。
-    """
+def _solar_term_jd_fallback(year, longitude):
+    """兜底算法：二分法求太阳视黄经达到目标值的 TT 儒略日。"""
     year = int(year)
     longitude = float(longitude) % 360.0
     delta_lon = (longitude - 280.46646) % 360.0
@@ -515,8 +558,43 @@ def solar_term_jd(year, longitude):
     return (lo + hi) / 2.0
 
 
+@lru_cache(maxsize=8192)
 def solar_term_beijing(year, longitude):
-    return jd_tt_to_beijing(solar_term_jd(year, longitude))
+    """给定公历年、目标黄经，返回该年对应定气的北京时间 datetime。
+
+    优先查参考库的节气表；查不到时回退到自研 Meeus 简式。
+    """
+    year = int(year)
+    longitude = float(longitude) % 360.0
+    names = _LON_TO_NAME.get(longitude)
+    if names:
+        try:
+            # 以该年年中为锚点取出参考库的节气表（覆盖前一年大雪 → 次年立春）
+            table = Solar.fromYmd(year, 6, 1).getLunar().getJieQiTable()
+            candidates = []
+            for key in names:
+                if not key:
+                    continue
+                dt = table.get(key)
+                if dt is not None:
+                    candidates.append(
+                        beijing(
+                            dt.getYear(), dt.getMonth(), dt.getDay(),
+                            dt.getHour(), dt.getMinute(), dt.getSecond(),
+                        )
+                    )
+            # 取落在本公历年内的那一次（同名的另一次属相邻年份）
+            for cand in candidates:
+                if cand.year == year:
+                    return cand
+        except Exception:
+            pass
+    return jd_tt_to_beijing(_solar_term_jd_fallback(year, longitude))
+
+
+def solar_term_jd(year, longitude):
+    """返回该年对应定气的 TT 儒略日（兼容旧接口，内部走 solar_term_beijing）。"""
+    return jd_from_datetime_utc(solar_term_beijing(year, longitude))
 
 
 def jie_events_around(year):
