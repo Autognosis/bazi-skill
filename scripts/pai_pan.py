@@ -1229,15 +1229,18 @@ def resolve_hour_pillar(day_gan, shichen):
 
 
 def qiyun_from_days(days):
-    """天数 ÷ 3 = 岁；余 1 天≈4 个月，余 2 天≈8 个月。不足一天按比例折月。"""
-    days = abs(float(days))
-    whole = int(days)
-    frac = days - whole
-    years, rem = divmod(whole, 3)
-    months = rem * 4 + int(round(frac * 4))
-    if months >= 12:
-        years += months // 12
-        months = months % 12
+    """起运折算：3 天 = 1 年，1 天 = 4 个月，余数不足 1 个月则舍去。
+
+    单位换算：
+        3 天（259200 秒） = 1 年
+        1 天（86400 秒）   = 4 个月  → 1 个月 = 21600 秒 = 6 小时
+    这里按**秒**换算再取整，保留完整精度；先截断到分钟会在临界点上
+    少算一个月（例：410358 秒 vs 410400 秒，截断后都变成 6839 分钟）。
+    返回 (岁, 月)，月为 0..11。
+    """
+    total_seconds = int(abs(float(days)) * 86400.0 + 0.5)
+    months_total = total_seconds // 21600       # 21600 秒 = 6 小时 = 1 个月
+    years, months = divmod(months_total, 12)
     return years, months
 
 
