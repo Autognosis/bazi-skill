@@ -61,12 +61,12 @@ from functools import lru_cache
 
 # 节气时刻优先采用内嵌的 lunar-python（寿星天文历定气）。
 # MIT License，见 vendor/lunar-python-LICENSE。
-# 农历换算暂仍用本文件自研实现，后续单独切换。
+# 农历换算（公历↔农历互转、闰月判定）同样委托该库，不再自行推历。
 _VENDOR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor")
 if _VENDOR not in sys.path:
     sys.path.insert(0, _VENDOR)
 
-from lunar_python import Solar  # noqa: E402
+from lunar_python import Lunar, Solar  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -729,126 +729,49 @@ def last_new_moon_k_on_or_before(jd_tt):
 
 
 # ---------------------------------------------------------------------------
-# 农历（冬至十一月 + 无中气置闰）
+# 农历（委托 vendor/lunar_python 计算）
 # ---------------------------------------------------------------------------
-
-def _zhongqi_jds(year):
-    out = []
-    for y in (year - 1, year, year + 1):
-        for lon in ZHONGQI_LONGS:
-            out.append(solar_term_jd(y, lon))
-    return out
-
-
-@lru_cache(maxsize=256)
-def lunar_months_between_dongzhi(dongzhi_year):
-    """从「dongzhi_year 的冬至所在十一月」起到下一年冬至月之前的各农历月。
-
-    返回 tuple of dict:
-      year, month, leap, start (date), days, shuo_jd
-    1990 年有闰五月；1990-04-21（非闰）= 1990-05-15。
-    """
-    y = int(dongzhi_year)
-    dz0 = solar_term_jd(y, 270)
-    dz1 = solar_term_jd(y + 1, 270)
-    k0 = last_new_moon_k_on_or_before(dz0)
-    k1 = last_new_moon_k_on_or_before(dz1)
-    moons = [new_moon_jde(k) for k in range(k0, k1 + 1)]
-    n = len(moons) - 1
-    zhong = _zhongqi_jds(y)
-    leap_index = None
-    if n == 13:
-        for i in range(n):
-            has = False
-            for z in zhong:
-                if moons[i] <= z < moons[i + 1]:
-                    has = True
-                    break
-            if not has:
-                leap_index = i
-                break
-    months = []
-    month_num = 11
-    lunar_year = y
-    for i in range(n):
-        is_leap = leap_index is not None and i == leap_index
-        if i > 0 and not is_leap:
-            month_num += 1
-            if month_num == 13:
-                month_num = 1
-                lunar_year = y + 1
-        start_d = jd_tt_to_beijing(moons[i]).date()
-        next_d = jd_tt_to_beijing(moons[i + 1]).date()
-        days = (next_d - start_d).days
-        months.append(
-            {
-                "year": lunar_year,
-                "month": month_num,
-                "leap": is_leap,
-                "start": start_d,
-                "days": days,
-                "shuo_jd": moons[i],
-            }
-        )
-    return tuple(months)
-
-
-def lunar_months_covering_solar_year(solar_year):
-    """覆盖该公历年的农历月（含前后冬至段，去重）。"""
-    a = lunar_months_between_dongzhi(solar_year - 1)
-    b = lunar_months_between_dongzhi(solar_year)
-    seen = set()
-    out = []
-    for m in a + b:
-        key = (m["start"], m["year"], m["month"], m["leap"])
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(m)
-    out.sort(key=lambda x: x["start"])
-    return out
-
+#
+# 说明：本项目原先自研「定朔 + 无中气置闰 + 冬至十一月」的农历算法，
+# 朔望与节气的天文计算本身是准确的，但闰月的定位与编号在多个年份与权威历法
+# 不符（2001 年应为闰四月、2014 年闰九月、2033 年闰十一月）。
+# 现统一委托 6tail/lunar-python（MIT License）计算农历，不再自行推历。
+# 下列函数保留原有签名与返回结构，调用方无需改动。
 
 def solar_to_lunar(y, m, d):
-    """公历日 → (农历年, 月, 日, 是否闰月)。"""
-    target = date(y, m, d)
-    months = lunar_months_covering_solar_year(y)
-    # 跨年：1 月可能落在上一段十二月，12 月落在下一年冬至段
-    if y - 1 >= 1890:
-        extra = lunar_months_between_dongzhi(y - 2)
-        months = list(extra) + list(months)
-    for info in months:
-        start = info["start"]
-        end = start + timedelta(days=info["days"])
-        if start <= target < end:
-            return info["year"], info["month"], (target - start).days + 1, info["leap"]
-    raise ValueError("无法把 %04d-%02d-%02d 换成农历（超出推算范围）" % (y, m, d))
+    """公历日 → (农历年, 月, 日, 是否闰月)。
+
+    闰月的月份用正数返回，同时 leap=True（例：2001-06-17 → (2001, 4, 26, True)）。
+    """
+    solar = Solar.fromYmd(int(y), int(m), int(d))
+    lunar = solar.getLunar()
+    month = lunar.getMonth()
+    return lunar.getYear(), abs(month), lunar.getDay(), month < 0
 
 
 def lunar_to_solar(ly, lm, ld, leap=False):
     """农历日 → 公历 date。闰月必须 leap=True。"""
-    # 正月在「冬至(ly-1) → 冬至(ly)」段；冬月、腊月在下一段
-    months = list(lunar_months_between_dongzhi(ly - 1)) + list(lunar_months_between_dongzhi(ly))
-    found = None
-    for info in months:
-        if info["year"] == ly and info["month"] == lm and bool(info["leap"]) == bool(leap):
-            found = info
-            break
-    if found is None:
+    ly, lm, ld = int(ly), int(lm), int(ld)
+    month = -lm if leap else lm
+    try:
+        solar = Lunar.fromYmd(ly, month, ld).getSolar()
+    except Exception:
         if leap:
             raise ValueError("农历 %d年没有闰%s" % (ly, LUNAR_MONTH_NAMES.get(lm, str(lm) + "月")))
         raise ValueError("找不到农历 %d年%s" % (ly, LUNAR_MONTH_NAMES.get(lm, str(lm) + "月")))
-    if ld < 1 or ld > found["days"]:
-        raise ValueError(
-            "农历 %d年%s%s只有 %d 天"
-            % (
-                ly,
-                "闰" if leap else "",
-                LUNAR_MONTH_NAMES.get(lm, str(lm) + "月"),
-                found["days"],
+    # lunar-python 对不存在的日期会回绕，这里校验换算结果与输入一致
+    back = solar.getLunar()
+    if back.getYear() != ly or back.getMonth() != month or back.getDay() != ld:
+        if leap:
+            raise ValueError(
+                "农历 %d年没有闰%s%s"
+                % (ly, LUNAR_MONTH_NAMES.get(lm, str(lm) + "月"), LUNAR_DAY_NAMES.get(ld, str(ld)))
             )
+        raise ValueError(
+            "农历 %d年%s没有%s这一天"
+            % (ly, LUNAR_MONTH_NAMES.get(lm, str(lm) + "月"), LUNAR_DAY_NAMES.get(ld, str(ld)))
         )
-    return found["start"] + timedelta(days=ld - 1)
+    return date(solar.getYear(), solar.getMonth(), solar.getDay())
 
 
 def format_lunar(ly, lm, ld, leap):
