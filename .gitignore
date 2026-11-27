@@ -1,0 +1,11 @@
+# IDE
+.vscode/
+
+# python
+__pycache__
+
+# agents
+.dsh-meow
+
+# 备份
+*.bak

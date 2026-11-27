@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""四柱八字排盘（零第三方依赖，仅标准库）。
+"""四柱八字排盘。
 
 时区一律按北京时间 UTC+8，不用本机本地时区。
-节气用太阳视黄经定气（立春=315°），农历用定气定朔
-（冬至所在月为十一月，无中气之月为闰月）。
+节气用太阳视黄经定气（立春=315°）。
+农历换算委托 vendor/lunar_python（6tail/lunar-python，MIT License）。
+
+外部依赖
+--------
+农历（公历↔农历互转、闰月判定）使用仓库内 vendor/lunar_python，
+不依赖 pip 安装，也不需联网。授权见 vendor/lunar-python-LICENSE。
+四柱、大运、流年、神煞等测算仍由本文件自行实现。
 
 算法锚点（供 QA 对照）
 ---------------------
@@ -54,9 +60,19 @@
 
 import argparse
 import math
+import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
+
+# 农历换算统一委托给内嵌的 lunar-python（MIT License，见 vendor/lunar-python-LICENSE）。
+# 自研的定朔+无中气置闰在闰月定位上与权威历法存在偏差（2001 闰四月、2014 闰九月、
+# 2033 闰十一月等），故农历相关一律走该库，本文件只保留四柱/大运/神煞等测算逻辑。
+_VENDOR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor")
+if _VENDOR not in sys.path:
+    sys.path.insert(0, _VENDOR)
+
+from lunar_python import Lunar, Solar  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -336,6 +352,150 @@ GAN_LABELS = ("年干", "月干", "日干", "时干")
 ZHI_LABELS = ("年支", "月支", "日支", "时支")
 MDH_ZHI_LABELS = ("月支", "日支", "时支")
 
+# ---------------------------------------------------------------------------
+# 神煞补充表（依据《三命通会》《渊海子平》通行口径，与 references/shensha-table.md 一致）
+# ---------------------------------------------------------------------------
+
+# 太极贵人：年干或日干查四柱地支
+TAIJI = {
+    "甲": ("子", "午"),
+    "乙": ("子", "午"),
+    "丙": ("卯", "酉"),
+    "丁": ("卯", "酉"),
+    "戊": ("辰", "戌", "丑", "未"),
+    "己": ("辰", "戌", "丑", "未"),
+    "庚": ("寅", "亥"),
+    "辛": ("寅", "亥"),
+    "壬": ("巳", "申"),
+    "癸": ("巳", "申"),
+}
+
+# 国印贵人：年干或日干查四柱地支
+GUOYIN = {
+    "甲": "戌",
+    "乙": "亥",
+    "丙": "丑",
+    "丁": "寅",
+    "戊": "丑",
+    "己": "寅",
+    "庚": "辰",
+    "辛": "巳",
+    "壬": "未",
+    "癸": "申",
+}
+
+# 天厨贵人：年干或日干查四柱地支
+TIANCHU = {
+    "甲": "巳",
+    "乙": "午",
+    "丙": "子",
+    "丁": "巳",
+    "戊": "午",
+    "己": "申",
+    "庚": "寅",
+    "辛": "午",
+    "壬": "酉",
+    "癸": "亥",
+}
+
+# 福星贵人：年干或日干查四柱地支
+FUXING = {
+    "甲": ("寅", "子"),
+    "乙": ("丑", "亥"),
+    "丙": ("子",),
+    "丁": ("酉",),
+    "戊": ("申",),
+    "己": ("未",),
+    "庚": ("午",),
+    "辛": ("巳",),
+    "壬": ("辰",),
+    "癸": ("卯", "丑"),
+}
+
+# 德秀贵人（月德 + 日干德）：以月支三合之德配合日干
+DEXIU = {
+    "寅": ("丙", "丁"),
+    "午": ("丙", "丁"),
+    "戌": ("丙", "丁"),
+    "申": ("壬", "癸"),
+    "子": ("壬", "癸"),
+    "辰": ("壬", "癸"),
+    "亥": ("甲", "乙"),
+    "卯": ("甲", "乙"),
+    "未": ("甲", "乙"),
+    "巳": ("庚", "辛"),
+    "酉": ("庚", "辛"),
+    "丑": ("庚", "辛"),
+}
+
+# 天赦日：按「季节 + 日柱」双条件判定，两者同时成立才见。
+#   春（寅卯辰月）逢戊寅日；夏（巳午未月）逢甲午日；
+#   秋（申酉戌月）逢戊申日；冬（亥子丑月）逢甲子日。
+# 注意：这四个干支日全年各出现约 6 次，但只有落在对应季节月份的才算天赦，
+# 所以一年实际约 4–8 天，不是「每个月 4 个季节各一次」。
+TIANSHE_SEASON = {
+    "寅": "戊寅", "卯": "戊寅", "辰": "戊寅",
+    "巳": "甲午", "午": "甲午", "未": "甲午",
+    "申": "戊申", "酉": "戊申", "戌": "戊申",
+    "亥": "甲子", "子": "甲子", "丑": "甲子",
+}
+
+# 魁罡：日柱为下列四组之一（《三命通会》）
+KUIGANG = ("庚辰", "庚戌", "壬辰", "戊戌")
+
+# 十恶大败：日柱为下列十组之一
+# 口诀：甲辰乙巳与壬申，丙申丁亥及庚辰，戊戌癸亥加辛巳，己丑都来十位神
+# 注意：庚辰、戊戌与魁罡重叠，古籍本来如此，二说并存，不是笔误。
+SHIE_DAIBAI = (
+    "甲辰", "乙巳", "丙申", "丁亥", "戊戌",
+    "己丑", "庚辰", "辛巳", "壬申", "癸亥",
+)
+
+# 六秀日：日柱为下列六组之一
+LIUXIU = ("丙午", "丁未", "戊子", "戊午", "己丑", "己未")
+
+# 金神：日柱或时柱为下列三组之一
+JINSHEN = ("乙丑", "己巳", "癸酉")
+
+# 童子煞：按年支三合 + 季节查日柱或时柱地支
+#   「春秋寅子贵，冬夏卯未辰；金木马卯合，水火鸡犬多，土命逢辰巳」
+TONGZI_SEASON = {
+    # 季节 -> 地支
+    "spring": ("寅", "子"),
+    "autumn": ("寅", "子"),
+    "winter": ("卯", "未", "辰"),
+    "summer": ("卯", "未", "辰"),
+}
+TONGZI_NAYIN = {
+    # 年柱纳音五行 -> 地支
+    "金": ("午", "卯"),
+    "木": ("午", "卯"),
+    "水": ("酉", "戌"),
+    "火": ("酉", "戌"),
+    "土": ("辰", "巳"),
+}
+
+# 纳音五行表（六十甲子），用于童子煞等
+NAYIN = {
+    "甲子": "金", "乙丑": "金", "丙寅": "火", "丁卯": "火", "戊辰": "木", "己巳": "木",
+    "庚午": "土", "辛未": "土", "壬申": "金", "癸酉": "金", "甲戌": "火", "乙亥": "火",
+    "丙子": "水", "丁丑": "水", "戊寅": "土", "己卯": "土", "庚辰": "金", "辛巳": "金",
+    "壬午": "木", "癸未": "木", "甲申": "水", "乙酉": "水", "丙戌": "土", "丁亥": "土",
+    "戊子": "火", "己丑": "火", "庚寅": "木", "辛卯": "木", "壬辰": "水", "癸巳": "水",
+    "甲午": "金", "乙未": "金", "丙申": "火", "丁酉": "火", "戊戌": "木", "己亥": "木",
+    "庚子": "土", "辛丑": "土", "壬寅": "金", "癸卯": "金", "甲辰": "火", "乙巳": "火",
+    "丙午": "水", "丁未": "水", "戊申": "土", "己酉": "土", "庚戌": "金", "辛亥": "金",
+    "壬子": "木", "癸丑": "木", "甲寅": "水", "乙卯": "水", "丙辰": "土", "丁巳": "土",
+    "戊午": "火", "己未": "火", "庚申": "木", "辛酉": "木", "壬戌": "水", "癸亥": "水",
+}
+
+# 天罗地网：辰为天罗、戌为地网，男怕天罗（辰）、女怕地网（戌）
+TIANLUO = "辰"
+DIWANG = "戌"
+
+# 天医的另一说法（月支前一位）已在原表；此处补「病符」= 月支前一位的上一支
+# 十二天将（贵人、螣蛇、朱雀、六合、勾陈、青龙、天空、白虎、太常、玄武、太阴、天后）
+# 按日干起贵人，本表只输出「天上贵人」相关，不作主论。
 # 时辰中点（仅 shichen、无 clock 时用于节气比较与起运）
 SHICHEN_MID = {
     "子": (0, 0),
@@ -470,11 +630,48 @@ def jdn(year, month, day):
 
 
 # ---------------------------------------------------------------------------
-# 太阳视黄经 / 二十四节气
+# 二十四节气
 # ---------------------------------------------------------------------------
+#
+# 优先使用 vendor/lunar_python 的寿星天文历定气（精度到秒级）。
+# 下方自研的 Meeus 简式仅作兜底：它约有 3–7 分钟误差，
+# 出生时刻若落在节气前后几分钟内，会把年柱/月柱判到错的月建上
+# （实测 2024 年立春：自研 16:20:11 vs 真实 16:27:07）。
+
+# 黄经 → (参考库表里的本年名, 跨年别名)
+# 参考库的节气表覆盖「前一年大雪 → 次年立春」共 31 项。
+# 同一个名字在这张表里可能出现两次，跨年的那次用大写别名区分：
+#   冬至 → DONG_ZHI（本年 12 月）、小寒 → XIAO_HAN、立春 → LI_CHUN 等。
+_LON_TO_NAME = {
+    315: ("立春", "LI_CHUN"),
+    345: ("惊蛰", "JING_ZHE"),
+    15: ("清明", None),
+    45: ("立夏", None),
+    75: ("芒种", None),
+    105: ("小暑", None),
+    135: ("立秋", None),
+    165: ("白露", None),
+    195: ("寒露", None),
+    225: ("立冬", None),
+    255: ("大雪", None),
+    285: ("小寒", "XIAO_HAN"),
+    270: ("冬至", "DONG_ZHI"),
+    300: ("大寒", "DA_HAN"),
+    330: ("雨水", "YU_SHUI"),
+    0: ("春分", None),
+    30: ("谷雨", None),
+    60: ("小满", None),
+    90: ("夏至", None),
+    120: ("大暑", None),
+    150: ("处暑", None),
+    180: ("秋分", None),
+    210: ("霜降", None),
+    240: ("小雪", None),
+}
+
 
 def sun_apparent_longitude(jd_tt):
-    """太阳视黄经（度）。Meeus AA 第 25 章简式，1900–2100 约 0.01°（十余分钟）以内。"""
+    """太阳视黄经（度）。Meeus AA 第 25 章简式，仅作兜底。"""
     T = (jd_tt - J2000) / 36525.0
     L0 = 280.46646 + 36000.76983 * T + 0.0003032 * T * T
     M = 357.52911 + 35999.05029 * T - 0.0001537 * T * T
@@ -495,12 +692,8 @@ def _lon_delta(actual, target):
 
 
 @lru_cache(maxsize=4096)
-def solar_term_jd(year, longitude):
-    """给定公历年、目标黄经，返回该年对应定气的 TT 儒略日。
-
-    当年 1 月 1 日太阳黄经约 280°，沿黄道正向走到 target（可跨 360°）。
-    立春 = 315°。禁止用「大约 2 月 3–5 日」这种写死日期。
-    """
+def _solar_term_jd_fallback(year, longitude):
+    """兜底算法：二分法求太阳视黄经达到目标值的 TT 儒略日。"""
     year = int(year)
     longitude = float(longitude) % 360.0
     delta_lon = (longitude - 280.46646) % 360.0
@@ -515,8 +708,43 @@ def solar_term_jd(year, longitude):
     return (lo + hi) / 2.0
 
 
+@lru_cache(maxsize=8192)
 def solar_term_beijing(year, longitude):
-    return jd_tt_to_beijing(solar_term_jd(year, longitude))
+    """给定公历年、目标黄经，返回该年对应定气的北京时间 datetime。
+
+    优先查参考库的节气表；查不到时回退到自研 Meeus 简式。
+    """
+    year = int(year)
+    longitude = float(longitude) % 360.0
+    names = _LON_TO_NAME.get(longitude)
+    if names:
+        try:
+            # 以该年年中为锚点取出参考库的节气表（覆盖前一年大雪 → 次年立春）
+            table = Solar.fromYmd(year, 6, 1).getLunar().getJieQiTable()
+            candidates = []
+            for key in names:
+                if not key:
+                    continue
+                dt = table.get(key)
+                if dt is not None:
+                    candidates.append(
+                        beijing(
+                            dt.getYear(), dt.getMonth(), dt.getDay(),
+                            dt.getHour(), dt.getMinute(), dt.getSecond(),
+                        )
+                    )
+            # 取落在本公历年内的那一次（同名的另一次属相邻年份）
+            for cand in candidates:
+                if cand.year == year:
+                    return cand
+        except Exception:
+            pass
+    return jd_tt_to_beijing(_solar_term_jd_fallback(year, longitude))
+
+
+def solar_term_jd(year, longitude):
+    """返回该年对应定气的 TT 儒略日（兼容旧接口，内部走 solar_term_beijing）。"""
+    return jd_from_datetime_utc(solar_term_beijing(year, longitude))
 
 
 def jie_events_around(year):
@@ -651,126 +879,49 @@ def last_new_moon_k_on_or_before(jd_tt):
 
 
 # ---------------------------------------------------------------------------
-# 农历（冬至十一月 + 无中气置闰）
+# 农历（委托 vendor/lunar_python 计算）
 # ---------------------------------------------------------------------------
-
-def _zhongqi_jds(year):
-    out = []
-    for y in (year - 1, year, year + 1):
-        for lon in ZHONGQI_LONGS:
-            out.append(solar_term_jd(y, lon))
-    return out
-
-
-@lru_cache(maxsize=256)
-def lunar_months_between_dongzhi(dongzhi_year):
-    """从「dongzhi_year 的冬至所在十一月」起到下一年冬至月之前的各农历月。
-
-    返回 tuple of dict:
-      year, month, leap, start (date), days, shuo_jd
-    1990 年有闰五月；1990-04-21（非闰）= 1990-05-15。
-    """
-    y = int(dongzhi_year)
-    dz0 = solar_term_jd(y, 270)
-    dz1 = solar_term_jd(y + 1, 270)
-    k0 = last_new_moon_k_on_or_before(dz0)
-    k1 = last_new_moon_k_on_or_before(dz1)
-    moons = [new_moon_jde(k) for k in range(k0, k1 + 1)]
-    n = len(moons) - 1
-    zhong = _zhongqi_jds(y)
-    leap_index = None
-    if n == 13:
-        for i in range(n):
-            has = False
-            for z in zhong:
-                if moons[i] <= z < moons[i + 1]:
-                    has = True
-                    break
-            if not has:
-                leap_index = i
-                break
-    months = []
-    month_num = 11
-    lunar_year = y
-    for i in range(n):
-        is_leap = leap_index is not None and i == leap_index
-        if i > 0 and not is_leap:
-            month_num += 1
-            if month_num == 13:
-                month_num = 1
-                lunar_year = y + 1
-        start_d = jd_tt_to_beijing(moons[i]).date()
-        next_d = jd_tt_to_beijing(moons[i + 1]).date()
-        days = (next_d - start_d).days
-        months.append(
-            {
-                "year": lunar_year,
-                "month": month_num,
-                "leap": is_leap,
-                "start": start_d,
-                "days": days,
-                "shuo_jd": moons[i],
-            }
-        )
-    return tuple(months)
-
-
-def lunar_months_covering_solar_year(solar_year):
-    """覆盖该公历年的农历月（含前后冬至段，去重）。"""
-    a = lunar_months_between_dongzhi(solar_year - 1)
-    b = lunar_months_between_dongzhi(solar_year)
-    seen = set()
-    out = []
-    for m in a + b:
-        key = (m["start"], m["year"], m["month"], m["leap"])
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(m)
-    out.sort(key=lambda x: x["start"])
-    return out
-
+#
+# 说明：本项目原先自研「定朔 + 无中气置闰 + 冬至十一月」的农历算法，
+# 朔望与节气的天文计算本身是准确的，但闰月的定位与编号在多个年份与权威历法
+# 不符（2001 年应为闰四月、2014 年闰九月、2033 年闰十一月）。
+# 现统一委托 6tail/lunar-python（MIT License）计算农历，不再自行推历。
+# 下列函数保留原有签名与返回结构，调用方无需改动。
 
 def solar_to_lunar(y, m, d):
-    """公历日 → (农历年, 月, 日, 是否闰月)。"""
-    target = date(y, m, d)
-    months = lunar_months_covering_solar_year(y)
-    # 跨年：1 月可能落在上一段十二月，12 月落在下一年冬至段
-    if y - 1 >= 1890:
-        extra = lunar_months_between_dongzhi(y - 2)
-        months = list(extra) + list(months)
-    for info in months:
-        start = info["start"]
-        end = start + timedelta(days=info["days"])
-        if start <= target < end:
-            return info["year"], info["month"], (target - start).days + 1, info["leap"]
-    raise ValueError("无法把 %04d-%02d-%02d 换成农历（超出推算范围）" % (y, m, d))
+    """公历日 → (农历年, 月, 日, 是否闰月)。
+
+    闰月的月份用正数返回，同时 leap=True（例：2001-06-17 → (2001, 4, 26, True)）。
+    """
+    solar = Solar.fromYmd(int(y), int(m), int(d))
+    lunar = solar.getLunar()
+    month = lunar.getMonth()
+    return lunar.getYear(), abs(month), lunar.getDay(), month < 0
 
 
 def lunar_to_solar(ly, lm, ld, leap=False):
     """农历日 → 公历 date。闰月必须 leap=True。"""
-    # 正月在「冬至(ly-1) → 冬至(ly)」段；冬月、腊月在下一段
-    months = list(lunar_months_between_dongzhi(ly - 1)) + list(lunar_months_between_dongzhi(ly))
-    found = None
-    for info in months:
-        if info["year"] == ly and info["month"] == lm and bool(info["leap"]) == bool(leap):
-            found = info
-            break
-    if found is None:
+    ly, lm, ld = int(ly), int(lm), int(ld)
+    month = -lm if leap else lm
+    try:
+        solar = Lunar.fromYmd(ly, month, ld).getSolar()
+    except Exception:
         if leap:
             raise ValueError("农历 %d年没有闰%s" % (ly, LUNAR_MONTH_NAMES.get(lm, str(lm) + "月")))
         raise ValueError("找不到农历 %d年%s" % (ly, LUNAR_MONTH_NAMES.get(lm, str(lm) + "月")))
-    if ld < 1 or ld > found["days"]:
-        raise ValueError(
-            "农历 %d年%s%s只有 %d 天"
-            % (
-                ly,
-                "闰" if leap else "",
-                LUNAR_MONTH_NAMES.get(lm, str(lm) + "月"),
-                found["days"],
+    # lunar-python 对不存在的日期会回绕，这里校验换算结果与输入一致
+    back = solar.getLunar()
+    if back.getYear() != ly or back.getMonth() != month or back.getDay() != ld:
+        if leap:
+            raise ValueError(
+                "农历 %d年没有闰%s%s"
+                % (ly, LUNAR_MONTH_NAMES.get(lm, str(lm) + "月"), LUNAR_DAY_NAMES.get(ld, str(ld)))
             )
+        raise ValueError(
+            "农历 %d年%s没有%s这一天"
+            % (ly, LUNAR_MONTH_NAMES.get(lm, str(lm) + "月"), LUNAR_DAY_NAMES.get(ld, str(ld)))
         )
-    return found["start"] + timedelta(days=ld - 1)
+    return date(solar.getYear(), solar.getMonth(), solar.getDay())
 
 
 def format_lunar(ly, lm, ld, leap):
@@ -923,6 +1074,84 @@ def compute_shensha(
     yuan_map = YUANCHEN_FORWARD if (yang_year == (sex == "男")) else YUANCHEN_REVERSE
     add("元辰", _shensha_positions(yuan_map[year_zhi], mdh_zhis, MDH_ZHI_LABELS), "年支阴阳男女")
     add("血刃", _shensha_positions(XUEREN[month_zhi], zhis, ZHI_LABELS), "月支")
+
+    # ---------------- 补充条目（依据《三命通会》《渊海子平》通行口径）----------------
+
+    # 太极贵人：年干或日干查四柱地支
+    taiji_need = set(TAIJI[year_gan]) | set(TAIJI[day_gan])
+    add("太极贵人", _shensha_positions(taiji_need, zhis, ZHI_LABELS), "年干/日干查地支")
+
+    # 国印贵人：年干或日干查四柱地支
+    guoyin_need = {GUOYIN[year_gan], GUOYIN[day_gan]}
+    add("国印贵人", _shensha_positions(guoyin_need, zhis, ZHI_LABELS), "年干/日干查地支")
+
+    # 天厨贵人：年干或日干查四柱地支
+    tianchu_need = {TIANCHU[year_gan], TIANCHU[day_gan]}
+    add("天厨贵人", _shensha_positions(tianchu_need, zhis, ZHI_LABELS), "年干/日干查地支")
+
+    # 福星贵人：年干或日干查四柱地支
+    fuxing_need = set(FUXING[year_gan]) | set(FUXING[day_gan])
+    add("福星贵人", _shensha_positions(fuxing_need, zhis, ZHI_LABELS), "年干/日干查地支")
+
+    # 德秀贵人：月支三合之德见于天干
+    add("德秀贵人", _shensha_positions(DEXIU[month_zhi], gans, GAN_LABELS), "月支三合查天干")
+
+    # 天赦日：季节 + 日柱，两项同时成立才见
+    she = TIANSHE_SEASON.get(month_zhi)
+    if she and (day_gan + day_zhi) == she:
+        add("天赦", ["日柱"], "季节+日柱")
+
+    # 魁罡：日柱四组之一
+    day_gz = day_gan + day_zhi
+    if day_gz in KUIGANG:
+        add("魁罡", ["日柱"], "日柱")
+
+    # 十恶大败：日柱十组之一
+    if day_gz in SHIE_DAIBAI:
+        add("十恶大败", ["日柱"], "日柱")
+
+    # 六秀日：日柱六组之一
+    if day_gz in LIUXIU:
+        add("六秀日", ["日柱"], "日柱")
+
+    # 金神：日柱或时柱
+    jinshen_pos = []
+    if day_gz in JINSHEN:
+        jinshen_pos.append("日柱")
+    if hour_gan is not None and (hour_gan + hour_zhi) in JINSHEN:
+        jinshen_pos.append("时柱")
+    add("金神", jinshen_pos, "日柱/时柱")
+
+    # 童子煞：季节查日时支 + 年柱纳音查日时支
+    season = {
+        "寅": "spring", "卯": "spring", "辰": "spring",
+        "巳": "summer", "午": "summer", "未": "summer",
+        "申": "autumn", "酉": "autumn", "戌": "autumn",
+        "亥": "winter", "子": "winter", "丑": "winter",
+    }[month_zhi]
+    tongzi_need = set(TONGZI_SEASON[season])
+    year_gz = year_gan + year_zhi
+    nayin_wx = NAYIN.get(year_gz)
+    if nayin_wx:
+        tongzi_need |= set(TONGZI_NAYIN[nayin_wx])
+    # 可查地支：时柱未知时**不含时支**。
+    # 铁律：时柱未知不得用时支凑神煞，否则会把未提供的信息当成已命中。
+    # 变量名避开上面四柱的 zhis，防止阴影覆盖。
+    tongzi_pairs = [
+        (z, lab) for z, lab in ((day_zhi, "日柱"), (hour_zhi, "时柱")) if z is not None
+    ]
+    tongzi_hits = [lab for z, lab in tongzi_pairs if z in tongzi_need]
+    # 说明文字随可查范围变化，避免"查日时支"与实际口径矛盾
+    if hour_zhi is None:
+        tongzi_method = "季节/年纳音查日支（时柱未知，未参与判定）"
+    else:
+        tongzi_method = "季节/年纳音查日时支"
+    add("童子煞", tongzi_hits, tongzi_method)
+
+    # 天罗地网：男忌辰、女忌戌
+    luowang = TIANLUO if sex == "男" else DIWANG
+    add("天罗地网", _shensha_positions(luowang, mdh_zhis, MDH_ZHI_LABELS), "男女查地支")
+
     return lines
 
 
@@ -1014,15 +1243,18 @@ def resolve_hour_pillar(day_gan, shichen):
 
 
 def qiyun_from_days(days):
-    """天数 ÷ 3 = 岁；余 1 天≈4 个月，余 2 天≈8 个月。不足一天按比例折月。"""
-    days = abs(float(days))
-    whole = int(days)
-    frac = days - whole
-    years, rem = divmod(whole, 3)
-    months = rem * 4 + int(round(frac * 4))
-    if months >= 12:
-        years += months // 12
-        months = months % 12
+    """起运折算：3 天 = 1 年，1 天 = 4 个月，余数不足 1 个月则舍去。
+
+    单位换算：
+        3 天（259200 秒） = 1 年
+        1 天（86400 秒）   = 4 个月  → 1 个月 = 21600 秒 = 6 小时
+    这里按**秒**换算再取整，保留完整精度；先截断到分钟会在临界点上
+    少算一个月（例：410358 秒 vs 410400 秒，截断后都变成 6839 分钟）。
+    返回 (岁, 月)，月为 0..11。
+    """
+    total_seconds = int(abs(float(days)) * 86400.0 + 0.5)
+    months_total = total_seconds // 21600       # 21600 秒 = 6 小时 = 1 个月
+    years, months = divmod(months_total, 12)
     return years, months
 
 
@@ -1063,6 +1295,7 @@ def compute(
     deceased_year=None,
     lunar_display=None,
     now=None,
+    with_variants=True,
 ):
     """核心排盘。solar_date 为公历 date；hour/minute 为北京钟表，可空。"""
     warnings = []
@@ -1229,7 +1462,95 @@ def compute(
         "jie_name": jie_name,
         "birth_dt": birth_dt,
         "shensha_lines": shensha_lines,
+        "boundary_variants": (
+            boundary_variants(solar_date, hour if clock_known else None, minute, sex, place)
+            if with_variants
+            else []
+        ),
     }
+
+
+def boundary_variants(solar_date, hour, minute, sex, place=None):
+    """出生时刻落在会改变四柱的临界点附近时，把可能的几种结果都算一遍。
+
+    用户往往记不清准确出生时刻（±30 分钟很常见），因此只在真正会改变
+    结果的临界点附近才展开，避免平时输出一堆无用组合。
+
+    会改变结果的临界点有四类：
+      1. 节气交界（含立春）—— 年柱 / 月柱可能跨到邻月邻年
+      2. 时辰交界（每小时末 15 分钟内）—— 时柱 / 日柱可能跨时辰
+      3. 23:00 夜子时界 —— 日柱可能跨日
+      4. 0:00 早子时界
+
+    返回 [{"label": 说明, "pillars": ..., "qiyun": ...}, ...]；
+    不敏感时返回空列表。
+    """
+    if hour is None:
+        return []
+    birth = beijing(solar_date.year, solar_date.month, solar_date.day, hour, minute)
+    base = compute(
+        solar_date, hour, minute, None, sex, place, None, None,
+        now=beijing(2100, 1, 1), with_variants=False,
+    )
+    base_pillars = _pillar_tuple(base["pillars"])
+
+    # 候选时刻：前后各 30 分钟，以及时辰/子时边界的另一侧
+    offsets = (-30, -15, 15, 30)
+    candidates = []
+    for off in offsets:
+        t = birth + timedelta(minutes=off)
+        candidates.append((t, "%+d 分钟" % off))
+    # 时辰临界：找到最近的时辰边界，取边界两侧各 1 分钟
+    total = hour * 60 + minute
+    for b in SHICHEN_BOUNDARIES_MIN:
+        if abs(total - b) <= 15:
+            for delta in (-1, 1):
+                t = birth + timedelta(minutes=(b + delta) - total)
+                candidates.append((t, "跨时辰边界 %02d:%02d" % (b // 60 % 24, b % 60)))
+            break
+    # 子时界 23:00
+    for b in (23 * 60, 0):
+        diff = ((b - total + 720) % 1440) - 720
+        if abs(diff) <= 30:
+            for delta in (-1, 1):
+                t = birth + timedelta(minutes=diff + delta)
+                candidates.append((t, "跨子时界 %02d:00" % (b // 60)))
+
+    seen = {base_pillars}
+    variants = []
+    for t, label in candidates:
+        if t.date().year < 1901 or t.date().year > 2099:
+            continue
+        try:
+            r = compute(
+                t.date(), t.hour, t.minute, None, sex, place, None, None,
+                now=beijing(2100, 1, 1), with_variants=False,
+            )
+        except ValueError:
+            continue
+        key = _pillar_tuple(r["pillars"])
+        if key in seen:
+            continue
+        seen.add(key)
+        variants.append(
+            {
+                "label": label,
+                "time": t,
+                "pillars": r["pillars"],
+                "qiyun_text": r["qiyun_text"],
+                "forward": r["forward"],
+            }
+        )
+    return variants
+
+
+def _pillar_tuple(p):
+    return (
+        p["year"][0] + p["year"][1],
+        p["month"][0] + p["month"][1],
+        p["day"][0] + p["day"][1],
+        p["hour"][0] + p["hour"][1],
+    )
 
 
 def format_report(result):
@@ -1276,6 +1597,38 @@ def format_report(result):
     lines.append("## 神煞")
     lines.extend(result["shensha_lines"])
     lines.append("")
+    variants = result.get("boundary_variants") or []
+    lines.append("## 边界情况（出生时刻落在临界点附近）")
+    if variants:
+        lines.append("出生时刻距四柱分界很近，若记不清准确时间，可能是下面几种结果：")
+        lines.append("")
+        lines.append("| 情形 | 时刻 | 四柱 | 大运 |")
+        lines.append("|---|---|---|---|")
+        lines.append(
+            "| 当前输入 | %s | %s | %s %s |"
+            % (
+                result["solar_text"],
+                " ".join(_pillar_tuple(p)),
+                "顺排" if result["forward"] else "逆排",
+                result["qiyun_text"],
+            )
+        )
+        for v in variants:
+            lines.append(
+                "| %s | %s | %s | %s %s |"
+                % (
+                    v["label"],
+                    v["time"].strftime("%Y-%m-%d %H:%M"),
+                    " ".join(_pillar_tuple(v["pillars"])),
+                    "顺排" if v["forward"] else "逆排",
+                    v["qiyun_text"],
+                )
+            )
+        lines.append("")
+        lines.append("请以实际出生记录为准；若仍不能确定，以上几种都需保留。")
+    else:
+        lines.append("- 无（出生时刻不在任何四柱分界附近）")
+    lines.append("")
     lines.append("## 警告")
     if result["warnings"]:
         # 去重且保持顺序
@@ -1296,6 +1649,13 @@ def format_report(result):
 # ---------------------------------------------------------------------------
 
 def parse_iso_date(text, flag):
+    """解析 YYYY-MM-DD。
+
+    注意：argparse.ArgumentTypeError 必须从**外层**抛出。
+    若写在 except ValueError 内部抛出，它会被 argparse 的
+    except (TypeError, ValueError) 一起吃掉，最终以未捕获堆栈崩溃
+    （ArgumentTypeError 是 ValueError 的子类）。
+    """
     try:
         parts = text.split("-")
         if len(parts) != 3:
@@ -1303,10 +1663,12 @@ def parse_iso_date(text, flag):
         y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
         return date(y, m, d)
     except ValueError:
-        raise argparse.ArgumentTypeError("%s 需要 YYYY-MM-DD，收到 %r" % (flag, text))
+        pass
+    raise argparse.ArgumentTypeError("%s 需要 YYYY-MM-DD，收到 %r" % (flag, text))
 
 
 def parse_hour(text):
+    """解析 HH:MM。同 parse_iso_date：ArgumentTypeError 必须在外层抛出。"""
     try:
         hh, mm = text.split(":")
         h, m = int(hh), int(mm)
@@ -1314,15 +1676,28 @@ def parse_hour(text):
             raise ValueError
         return h, m
     except ValueError:
-        raise argparse.ArgumentTypeError("--hour 需要 HH:MM，收到 %r" % text)
+        pass
+    raise argparse.ArgumentTypeError("--hour 需要 HH:MM，收到 %r" % text)
+
+
+def _iso_date_arg(flag):
+    """把 parse_iso_date 绑定到具体参数名，供 argparse 的 type= 使用。
+
+    必须走 type= 回调，argparse 才会捕获 ArgumentTypeError 并转成干净的
+    用法错误（退出码 2）；在 run() 里手工调用会让异常逃逸成未捕获堆栈。
+    """
+    def _parse(text):
+        return parse_iso_date(text, flag)
+    _parse.__name__ = "iso_date"
+    return _parse
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="四柱八字排盘（北京时间，无第三方依赖）")
-    p.add_argument("--solar", help="阳历 YYYY-MM-DD")
-    p.add_argument("--lunar", help="农历 YYYY-MM-DD（年-月-日数字）")
+    p = argparse.ArgumentParser(description="四柱八字排盘（北京时间，农历依赖内嵌 vendor/lunar_python）")
+    p.add_argument("--solar", type=_iso_date_arg("--solar"), help="阳历 YYYY-MM-DD")
+    p.add_argument("--lunar", type=_iso_date_arg("--lunar"), help="农历 YYYY-MM-DD（年-月-日数字）")
     p.add_argument("--leap", action="store_true", help="农历闰月")
-    p.add_argument("--hour", help="出生钟点 HH:MM（北京时间），与 --shichen 互斥")
+    p.add_argument("--hour", type=parse_hour, help="出生钟点 HH:MM（北京时间），与 --shichen 互斥")
     p.add_argument("--shichen", choices=ZHI_LIST, help="时辰地支")
     p.add_argument("--sex", required=True, choices=("男", "女"), help="性别（必填）")
     p.add_argument("--place", help="出生地（只展示；近时辰边界时警告）")
@@ -1341,16 +1716,18 @@ def run(argv=None):
     if args.leap and not args.lunar:
         parser.error("--leap 只能与 --lunar 同时使用")
 
+    # --hour 的 type=parse_hour 已把值转成 (时, 分)
     hour = minute = None
-    if args.hour:
-        hour, minute = parse_hour(args.hour)
+    if args.hour is not None:
+        hour, minute = args.hour
 
+    # --solar / --lunar 的 type= 已把值转成 datetime.date
     solar_date = None
     lunar_display = None
     if args.solar:
-        solar_date = parse_iso_date(args.solar, "--solar")
+        solar_date = args.solar
     if args.lunar:
-        lunar_date = parse_iso_date(args.lunar, "--lunar")
+        lunar_date = args.lunar
         try:
             converted = lunar_to_solar(lunar_date.year, lunar_date.month, lunar_date.day, leap=args.leap)
         except ValueError as exc:
@@ -1388,6 +1765,16 @@ def run(argv=None):
 
 
 def main():
+    # 统一 stdout 编码，保证跨平台输出一致。
+    # Linux / macOS 默认即 UTF-8；Windows 控制台默认本地代码页（简中为 cp936），
+    # 若输出被重定向到管道（测试脚本、CI），非 ASCII 内容会按本地编码写出，
+    # 读取方按 UTF-8 解码即失败。这里只调整输出流编码，不改动任何计算逻辑。
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:          # Python 3.7+
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
     sys.exit(run())
 
 

@@ -154,7 +154,7 @@ python3 scripts/pai_pan.py --solar 1990-05-15 --hour 12:00 --sex 男 --deceased-
 | 出生地 | `--place …` | 可选；只用于展示和时辰边界警告 |
 | 已故年份 | `--deceased-year YYYY` | Step 8 为已故时必传；流年只列到该年 |
 
-阳历、农历至少要有一个。本机需要 `python3`，无 pip 依赖。
+阳历、农历至少要有一个。本机需要 `python3`，无 pip 依赖（农历所需的 lunar-python 已内嵌在仓库 `vendor/` 下）。
 
 ### 使用 stdout
 

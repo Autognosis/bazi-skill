@@ -14,7 +14,7 @@
 
 ## 安装
 
-> **注意**：Claude Code 从 git 仓库根目录的 `.claude/skills/` 查找 skill，请在正确的位置执行。本机需已安装 `python3`（只用标准库，无额外 pip 依赖）。
+> **注意**：Claude Code 从 git 仓库根目录的 `.claude/skills/` 查找 skill，请在正确的位置执行。本机需已安装 `python3`（3.6+ 即可）。依赖已内嵌在仓库 `vendor/` 下，**无需 pip 安装任何包**。
 
 ```bash
 # 安装到当前项目（在 git 仓库根目录执行）
@@ -33,7 +33,7 @@ git clone https://github.com/jinchenma94/bazi-skill ~/.claude/skills/bazi
 
 触发后，Skill 会逐步引导你提供出生信息，然后调用本仓库的排盘脚本并做综合分析。
 
-排盘依赖本机 **python3**（3.6+ 即可），只用标准库，**无需 pip 安装任何第三方包**。确认出生信息后会执行：
+排盘依赖本机 **python3**（3.6+ 即可）。农历部分使用内嵌在 `vendor/lunar_python/` 的 6tail/lunar-python（MIT），随仓库分发，**无需 pip 安装任何第三方包**；四柱、大运、流年、神煞为本项目自研。确认出生信息后会执行：
 
 ```bash
 python3 scripts/pai_pan.py --solar 1990-05-15 --shichen 午 --sex 男
