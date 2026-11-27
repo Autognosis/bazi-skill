@@ -475,6 +475,46 @@ class CliTests(unittest.TestCase):
         self.assertIn("闰", err)
 
 
+class LunarDateValidationTests(unittest.TestCase):
+    """农历日期校验不得套用公历月长。
+
+    回归：--lunar 曾复用 --solar 的 parse_iso_date，用 datetime.date 校验，
+    而公历二月最多 29 天，导致合法的「农历 2023-02-30」被误判为非法。
+    农历月长是 29/30 天、闰年有闰月，公历规则不适用。
+    """
+
+    def test_lunar_day_30_in_big_month_is_accepted(self):
+        """2023 年正二月为 30 天大月（闰二月在次月）：农历 2023-02-30 = 公历 2023-03-21。"""
+        code, out, err = run_pai("--lunar", "2023-02-30", "--sex", "男")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(field(out, "阳历"), "2023-03-21")
+        self.assertEqual(field(out, "农历"), "2023年二月三十")
+
+    def test_lunar_day_30_in_small_month_is_rejected(self):
+        """2023 正月只有 29 天（小月），农历 2023-01-30 必须拒绝且提示小月。"""
+        code, out, err = run_pai("--lunar", "2023-01-30", "--sex", "男")
+        self.assertEqual(code, 2)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("29 天", err)
+
+    def test_leap_month_day_maps_independently(self):
+        """2023 闰二月 29 天：闰二月廿九 = 公历 2023-04-19，与正二月廿九（03-20）不同日。"""
+        code, out, err = run_pai("--lunar", "2023-02-29", "--leap", "--sex", "男")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(field(out, "阳历"), "2023-04-19")
+        code2, out2, err2 = run_pai("--lunar", "2023-02-29", "--sex", "男")
+        self.assertEqual(code2, 0, err2)
+        self.assertEqual(field(out2, "阳历"), "2023-03-20")
+
+    def test_solar_still_rejects_invalid_gregorian_day(self):
+        """修复不得放松公历校验：--solar 2023-02-30 仍须拒绝。"""
+        code, out, err = run_pai("--solar", "2023-02-30", "--sex", "男")
+        self.assertEqual(code, 2)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("--solar", err)
+
+
 class ShenshaTests(unittest.TestCase):
     def test_golden_shensha_hits_and_misses(self):
         """1990-05-15 午时男：有天乙贵人、将星；地支无申无卯，无驿马、桃花。"""
