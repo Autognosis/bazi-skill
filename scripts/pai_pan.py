@@ -1281,6 +1281,7 @@ def compute(
     deceased_year=None,
     lunar_display=None,
     now=None,
+    with_variants=True,
 ):
     """核心排盘。solar_date 为公历 date；hour/minute 为北京钟表，可空。"""
     warnings = []
@@ -1447,7 +1448,95 @@ def compute(
         "jie_name": jie_name,
         "birth_dt": birth_dt,
         "shensha_lines": shensha_lines,
+        "boundary_variants": (
+            boundary_variants(solar_date, hour if clock_known else None, minute, sex, place)
+            if with_variants
+            else []
+        ),
     }
+
+
+def boundary_variants(solar_date, hour, minute, sex, place=None):
+    """出生时刻落在会改变四柱的临界点附近时，把可能的几种结果都算一遍。
+
+    用户往往记不清准确出生时刻（±30 分钟很常见），因此只在真正会改变
+    结果的临界点附近才展开，避免平时输出一堆无用组合。
+
+    会改变结果的临界点有四类：
+      1. 节气交界（含立春）—— 年柱 / 月柱可能跨到邻月邻年
+      2. 时辰交界（每小时末 15 分钟内）—— 时柱 / 日柱可能跨时辰
+      3. 23:00 夜子时界 —— 日柱可能跨日
+      4. 0:00 早子时界
+
+    返回 [{"label": 说明, "pillars": ..., "qiyun": ...}, ...]；
+    不敏感时返回空列表。
+    """
+    if hour is None:
+        return []
+    birth = beijing(solar_date.year, solar_date.month, solar_date.day, hour, minute)
+    base = compute(
+        solar_date, hour, minute, None, sex, place, None, None,
+        now=beijing(2100, 1, 1), with_variants=False,
+    )
+    base_pillars = _pillar_tuple(base["pillars"])
+
+    # 候选时刻：前后各 30 分钟，以及时辰/子时边界的另一侧
+    offsets = (-30, -15, 15, 30)
+    candidates = []
+    for off in offsets:
+        t = birth + timedelta(minutes=off)
+        candidates.append((t, "%+d 分钟" % off))
+    # 时辰临界：找到最近的时辰边界，取边界两侧各 1 分钟
+    total = hour * 60 + minute
+    for b in SHICHEN_BOUNDARIES_MIN:
+        if abs(total - b) <= 15:
+            for delta in (-1, 1):
+                t = birth + timedelta(minutes=(b + delta) - total)
+                candidates.append((t, "跨时辰边界 %02d:%02d" % (b // 60 % 24, b % 60)))
+            break
+    # 子时界 23:00
+    for b in (23 * 60, 0):
+        diff = ((b - total + 720) % 1440) - 720
+        if abs(diff) <= 30:
+            for delta in (-1, 1):
+                t = birth + timedelta(minutes=diff + delta)
+                candidates.append((t, "跨子时界 %02d:00" % (b // 60)))
+
+    seen = {base_pillars}
+    variants = []
+    for t, label in candidates:
+        if t.date().year < 1901 or t.date().year > 2099:
+            continue
+        try:
+            r = compute(
+                t.date(), t.hour, t.minute, None, sex, place, None, None,
+                now=beijing(2100, 1, 1), with_variants=False,
+            )
+        except ValueError:
+            continue
+        key = _pillar_tuple(r["pillars"])
+        if key in seen:
+            continue
+        seen.add(key)
+        variants.append(
+            {
+                "label": label,
+                "time": t,
+                "pillars": r["pillars"],
+                "qiyun_text": r["qiyun_text"],
+                "forward": r["forward"],
+            }
+        )
+    return variants
+
+
+def _pillar_tuple(p):
+    return (
+        p["year"][0] + p["year"][1],
+        p["month"][0] + p["month"][1],
+        p["day"][0] + p["day"][1],
+        p["hour"][0] + p["hour"][1],
+    )
 
 
 def format_report(result):
@@ -1493,6 +1582,38 @@ def format_report(result):
     lines.append("")
     lines.append("## 神煞")
     lines.extend(result["shensha_lines"])
+    lines.append("")
+    variants = result.get("boundary_variants") or []
+    lines.append("## 边界情况（出生时刻落在临界点附近）")
+    if variants:
+        lines.append("出生时刻距四柱分界很近，若记不清准确时间，可能是下面几种结果：")
+        lines.append("")
+        lines.append("| 情形 | 时刻 | 四柱 | 大运 |")
+        lines.append("|---|---|---|---|")
+        lines.append(
+            "| 当前输入 | %s | %s | %s %s |"
+            % (
+                result["solar_text"],
+                " ".join(_pillar_tuple(p)),
+                "顺排" if result["forward"] else "逆排",
+                result["qiyun_text"],
+            )
+        )
+        for v in variants:
+            lines.append(
+                "| %s | %s | %s | %s %s |"
+                % (
+                    v["label"],
+                    v["time"].strftime("%Y-%m-%d %H:%M"),
+                    " ".join(_pillar_tuple(v["pillars"])),
+                    "顺排" if v["forward"] else "逆排",
+                    v["qiyun_text"],
+                )
+            )
+        lines.append("")
+        lines.append("请以实际出生记录为准；若仍不能确定，以上几种都需保留。")
+    else:
+        lines.append("- 无（出生时刻不在任何四柱分界附近）")
     lines.append("")
     lines.append("## 警告")
     if result["warnings"]:
