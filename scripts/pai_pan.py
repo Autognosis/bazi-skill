@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""四柱八字排盘（零第三方依赖，仅标准库）。
+"""四柱八字排盘。
 
 时区一律按北京时间 UTC+8，不用本机本地时区。
-节气用太阳视黄经定气（立春=315°），农历用定气定朔
-（冬至所在月为十一月，无中气之月为闰月）。
+节气用太阳视黄经定气（立春=315°）。
+农历换算委托 vendor/lunar_python（6tail/lunar-python，MIT License）。
+
+外部依赖
+--------
+农历（公历↔农历互转、闰月判定）使用仓库内 vendor/lunar_python，
+不依赖 pip 安装，也不需联网。授权见 vendor/lunar-python-LICENSE。
+四柱、大运、流年、神煞等测算仍由本文件自行实现。
 
 算法锚点（供 QA 对照）
 ---------------------
@@ -59,9 +65,9 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 
-# 节气时刻优先采用内嵌的 lunar-python（寿星天文历定气）。
-# MIT License，见 vendor/lunar-python-LICENSE。
-# 农历换算（公历↔农历互转、闰月判定）同样委托该库，不再自行推历。
+# 农历换算统一委托给内嵌的 lunar-python（MIT License，见 vendor/lunar-python-LICENSE）。
+# 自研的定朔+无中气置闰在闰月定位上与权威历法存在偏差（2001 闰四月、2014 闰九月、
+# 2033 闰十一月等），故农历相关一律走该库，本文件只保留四柱/大运/神煞等测算逻辑。
 _VENDOR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor")
 if _VENDOR not in sys.path:
     sys.path.insert(0, _VENDOR)
