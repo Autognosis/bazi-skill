@@ -1733,6 +1733,16 @@ def run(argv=None):
 
 
 def main():
+    # 统一 stdout 编码，保证跨平台输出一致。
+    # Linux / macOS 默认即 UTF-8；Windows 控制台默认本地代码页（简中为 cp936），
+    # 若输出被重定向到管道（测试脚本、CI），非 ASCII 内容会按本地编码写出，
+    # 读取方按 UTF-8 解码即失败。这里只调整输出流编码，不改动任何计算逻辑。
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:          # Python 3.7+
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
     sys.exit(run())
 
 
