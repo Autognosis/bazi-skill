@@ -2,7 +2,7 @@
 """四柱八字排盘。
 
 时区一律按北京时间 UTC+8，不用本机本地时区。
-节气用太阳视黄经定气（立春=315°）。
+节气优先取 vendor/lunar_python 的节气表（秒级），查不到时回退 Meeus 简式（立春=315°）。
 农历换算委托 vendor/lunar_python（6tail/lunar-python，MIT License）。
 
 外部依赖
@@ -43,11 +43,16 @@
    余 1 天 ≈ 4 个月，余 2 天 ≈ 8 个月。起运前用月柱作小运。
    锚点：1990-05-15 男（阳年）必须顺排。
 
-7. 节气时刻：太阳视黄经（Meeus 简式，等价于寿星定气）。
-   立春=黄经 315°。精确到小时以上，覆盖 1900–2100。禁止写死「立春大约 2 月 3-5 日」。
+7. 节气时刻（定气）：
+   优先查 vendor/lunar_python 的节气表——精度到秒，与紫金山天文台
+   《中国天文年历》口径一致；取表失败时回退自研 Meeus 简式，并向
+   stderr 告警一次。回退值与真实值相差 3–7 分钟，落在临界点附近的
+   命例可能因此判错年柱 / 月柱 / 大运方向。
+   立春 = 黄经 315°。禁止写死「立春大约 2 月 3-5 日」。
 
-8. 农历：节气+朔望。冬至所在月为十一月，无中气之月为闰月。
-   朔用 Meeus 定朔（TT），再换北京日期。
+8. 农历：委托 vendor/lunar_python（不再自研定朔与置闰）。
+   闰月用正数月份 + leap 标记表示；农历日转公历时另做回绕校验，
+   不存在（含小月无三十）抛中文 ValueError。
    非闰月锚点：1990 农历四月廿一 = 1990-05-15。
 
 9. 神煞：与 references/shensha-table.md 同一张表。只输出命局命中的条目；
@@ -62,7 +67,7 @@ import math
 import os
 import sys
 from collections import namedtuple
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 
 # 农历换算统一委托给内嵌的 lunar-python（MIT License，见 vendor/lunar-python-LICENSE）。
@@ -675,14 +680,14 @@ def delta_t_seconds(year):
 
 def jd_from_datetime_utc(dt):
     """datetime（带时区）→ 儒略日（UTC）。"""
-    utc = dt.astimezone(UTC)
-    unix = (utc - datetime(1970, 1, 1, tzinfo=UTC)).total_seconds()
+    utc = dt.astimezone(timezone.utc)
+    unix = (utc - datetime(1970, 1, 1, tzinfo=timezone.utc)).total_seconds()
     return UNIX_JD + unix / 86400.0
 
 
 def datetime_utc_from_jd(jd):
     seconds = (jd - UNIX_JD) * 86400.0
-    return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(seconds=seconds)
+    return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=seconds)
 
 
 def jd_tt_to_beijing(jd_tt):
@@ -783,11 +788,33 @@ def _solar_term_jd_fallback(year, longitude):
     return (lo + hi) / 2.0
 
 
+# 已告警过的 (year, longitude)：保证「回退 Meeus」每次进程只提示一次，
+# 避免同一个节气在大量排盘/边界展开时刷屏。
+_FALLBACK_WARNED = set()
+
+
+def _warn_fallback(year, longitude, exc):
+    """回退到 Meeus 简式时向 stderr 提示一次。
+
+    只捕获明确的异常类型（见 solar_term_beijing），这里负责让降级不再静默：
+    Meeus 简式与寿星定气差 3–7 分钟，落在临界点附近的命例会因此判错年柱/月柱。
+    """
+    key = (year, longitude)
+    if key in _FALLBACK_WARNED:
+        return
+    _FALLBACK_WARNED.add(key)
+    sys.stderr.write(
+        "[warn] 节气表读取失败，已回退 Meeus 简式（误差 3-7 分钟）："
+        "year=%d lon=%g (%s: %s)\n"
+        % (year, longitude, type(exc).__name__, exc)
+    )
+
+
 @lru_cache(maxsize=8192)
 def solar_term_beijing(year, longitude):
     """给定公历年、目标黄经，返回该年对应定气的北京时间 datetime。
 
-    优先查参考库的节气表；查不到时回退到自研 Meeus 简式。
+    优先查参考库的节气表；查不到时回退到自研 Meeus 简式，并向 stderr 告警一次。
     """
     year = int(year)
     longitude = float(longitude) % 360.0
@@ -816,8 +843,10 @@ def solar_term_beijing(year, longitude):
             for cand in candidates:
                 if cand.year == year:
                     return cand
-        except Exception:
-            pass
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            # 只接住「取表/取字段」会出现的明确错误；其余异常继续上抛，
+            # 不再像原实现那样 except Exception: pass 把库的真实缺陷吞掉。
+            _warn_fallback(year, longitude, exc)
     return jd_tt_to_beijing(_solar_term_jd_fallback(year, longitude))
 
 
@@ -1769,8 +1798,10 @@ def format_report(result):
     lines.extend(result["shensha_lines"])
     lines.append("")
     variants = result.get("boundary_variants") or []
-    lines.append("## 边界情况（出生时刻落在临界点附近）")
+    # 未命中临界点时整节省略：下游按 "## " 分节解析时，不该平白多出一节。
+    # 是否敏感由「有没有这一节」直接表达，不再用 "- 无" 占位。
     if variants:
+        lines.append("## 边界情况（出生时刻落在临界点附近）")
         lines.append("出生时刻距四柱分界很近，若记不清准确时间，可能是下面几种结果：")
         lines.append("")
         lines.append("| 情形 | 时刻 | 四柱 | 大运 |")
@@ -1797,9 +1828,7 @@ def format_report(result):
             )
         lines.append("")
         lines.append("请以实际出生记录为准；若仍不能确定，以上几种都需保留。")
-    else:
-        lines.append("- 无（出生时刻不在任何四柱分界附近）")
-    lines.append("")
+        lines.append("")
     lines.append("## 警告")
     if result["warnings"]:
         # 去重且保持顺序

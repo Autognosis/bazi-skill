@@ -328,13 +328,17 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn("当前输入", block)
 
     def test_normal_time_has_no_variants(self):
-        """普通时刻不应展开边界表，避免输出无用组合。"""
+        """普通时刻不应输出边界情况小节：整节缺席，而不是用占位行代替。"""
         code, out, err = run_pai(
             "--solar", "1990-05-15", "--hour", "12:00", "--sex", "男"
         )
         self.assertEqual(code, 0, err)
-        block = boundary_block(out)
-        self.assertIn("无（出生时刻不在任何四柱分界附近）", block)
+        # 整节缺席是契约的一部分：下游按 ## 分节解析，不该平白多出一节。
+        self.assertNotIn("## 边界情况", out)
+        self.assertNotIn("出生时刻不在任何四柱分界附近", out)
+        # 相邻的小节必须照常输出，证明省略只发生在这一节，没有连带吞掉别的。
+        self.assertIn("## 神煞", out)
+        self.assertIn("## 警告", out)
 
     def test_zi_hour_boundary_lists_both_days(self):
         """23:10 紧邻夜子时界：必须同时列出当日庚辰日柱与次日辛巳日柱。"""
