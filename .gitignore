@@ -9,3 +9,7 @@ __pycache__
 
 # 备份
 *.bak
+
+# 本地草稿（PR 描述、issue 草稿，不入库）
+.pr-description.md
+.issue-*.md
