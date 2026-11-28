@@ -783,11 +783,33 @@ def _solar_term_jd_fallback(year, longitude):
     return (lo + hi) / 2.0
 
 
+# 已告警过的 (year, longitude)：保证「回退 Meeus」每次进程只提示一次，
+# 避免同一个节气在大量排盘/边界展开时刷屏。
+_FALLBACK_WARNED = set()
+
+
+def _warn_fallback(year, longitude, exc):
+    """回退到 Meeus 简式时向 stderr 提示一次。
+
+    只捕获明确的异常类型（见 solar_term_beijing），这里负责让降级不再静默：
+    Meeus 简式与寿星定气差 3–7 分钟，落在临界点附近的命例会因此判错年柱/月柱。
+    """
+    key = (year, longitude)
+    if key in _FALLBACK_WARNED:
+        return
+    _FALLBACK_WARNED.add(key)
+    sys.stderr.write(
+        "[warn] 节气表读取失败，已回退 Meeus 简式（误差 3-7 分钟）："
+        "year=%d lon=%g (%s: %s)\n"
+        % (year, longitude, type(exc).__name__, exc)
+    )
+
+
 @lru_cache(maxsize=8192)
 def solar_term_beijing(year, longitude):
     """给定公历年、目标黄经，返回该年对应定气的北京时间 datetime。
 
-    优先查参考库的节气表；查不到时回退到自研 Meeus 简式。
+    优先查参考库的节气表；查不到时回退到自研 Meeus 简式，并向 stderr 告警一次。
     """
     year = int(year)
     longitude = float(longitude) % 360.0
@@ -816,8 +838,10 @@ def solar_term_beijing(year, longitude):
             for cand in candidates:
                 if cand.year == year:
                     return cand
-        except Exception:
-            pass
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            # 只接住「取表/取字段」会出现的明确错误；其余异常继续上抛，
+            # 不再像原实现那样 except Exception: pass 把库的真实缺陷吞掉。
+            _warn_fallback(year, longitude, exc)
     return jd_tt_to_beijing(_solar_term_jd_fallback(year, longitude))
 
 
