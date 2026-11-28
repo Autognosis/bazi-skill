@@ -62,7 +62,7 @@ import math
 import os
 import sys
 from collections import namedtuple
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 
 # 农历换算统一委托给内嵌的 lunar-python（MIT License，见 vendor/lunar-python-LICENSE）。
@@ -675,14 +675,14 @@ def delta_t_seconds(year):
 
 def jd_from_datetime_utc(dt):
     """datetime（带时区）→ 儒略日（UTC）。"""
-    utc = dt.astimezone(UTC)
-    unix = (utc - datetime(1970, 1, 1, tzinfo=UTC)).total_seconds()
+    utc = dt.astimezone(timezone.utc)
+    unix = (utc - datetime(1970, 1, 1, tzinfo=timezone.utc)).total_seconds()
     return UNIX_JD + unix / 86400.0
 
 
 def datetime_utc_from_jd(jd):
     seconds = (jd - UNIX_JD) * 86400.0
-    return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(seconds=seconds)
+    return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=seconds)
 
 
 def jd_tt_to_beijing(jd_tt):
