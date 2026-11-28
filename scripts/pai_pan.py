@@ -1793,8 +1793,10 @@ def format_report(result):
     lines.extend(result["shensha_lines"])
     lines.append("")
     variants = result.get("boundary_variants") or []
-    lines.append("## 边界情况（出生时刻落在临界点附近）")
+    # 未命中临界点时整节省略：下游按 "## " 分节解析时，不该平白多出一节。
+    # 是否敏感由「有没有这一节」直接表达，不再用 "- 无" 占位。
     if variants:
+        lines.append("## 边界情况（出生时刻落在临界点附近）")
         lines.append("出生时刻距四柱分界很近，若记不清准确时间，可能是下面几种结果：")
         lines.append("")
         lines.append("| 情形 | 时刻 | 四柱 | 大运 |")
@@ -1821,9 +1823,7 @@ def format_report(result):
             )
         lines.append("")
         lines.append("请以实际出生记录为准；若仍不能确定，以上几种都需保留。")
-    else:
-        lines.append("- 无（出生时刻不在任何四柱分界附近）")
-    lines.append("")
+        lines.append("")
     lines.append("## 警告")
     if result["warnings"]:
         # 去重且保持顺序
